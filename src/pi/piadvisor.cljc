@@ -1,0 +1,269 @@
+(ns pi.piadvisor
+  "PaymentOps-LLM client -- the *contained intelligence node* for the PI
+  (Payment Institution) actor.
+
+  It normalizes account intake, drafts a per-jurisdiction AML/KYC evidence
+  checklist, screens accounts for an unresolved sanctions flag, drafts
+  PIS/AIS consent registration, drafts the payment-execution action, and
+  drafts the remittance-payout action. CRITICAL: it is a smart-but-
+  untrusted advisor. It returns a *proposal* (with a rationale + the
+  fields it cited), never a committed record or a real payment execution/
+  remittance payout. Every output is censored downstream by `pi.governor`
+  before anything touches the SSoT, and `:actuation/execute-payment`/
+  `:actuation/remit-payout` proposals NEVER auto-commit at any phase --
+  see README `Actuation`.
+
+  Like every sibling actor's advisor, this is a deterministic mock so the
+  actor graph runs offline and the governor contract is exercised
+  end-to-end. In production this calls a real LLM (kotoba-llm or
+  equivalent) with the same proposal shape.
+
+  Proposal shape (all kinds):
+    {:summary    str            ; human-facing draft / finding
+     :rationale  str            ; why -- SCANNED by the spec-basis gate
+     :cites      [kw|str ..]    ; facts/sources the LLM used -- SCANNED too
+     :effect     kw             ; how a commit would mutate the SSoT
+     :stake      kw|nil         ; :actuation/execute-payment | :actuation/remit-payout | nil
+     :confidence 0..1}"
+  (:require #?(:clj  [clojure.edn :as edn]
+               :cljs [cljs.reader :as edn])
+            [clojure.string :as str]
+            [pi.facts :as facts]
+            [pi.registry :as registry]
+            [pi.store :as store]
+            [langchain.model :as model]))
+
+(defn- normalize-intake
+  "Directory upsert -- the LLM only normalizes/validates the patch; it
+  does not invent the account, jurisdiction or IBAN. High confidence, low
+  stakes."
+  [_db {:keys [patch]}]
+  {:summary    (str "口座記録更新: " (pr-str (keys patch)))
+   :rationale  "入力 patch の正規化のみ。新規事実の生成なし。"
+   :cites      (vec (keys patch))
+   :effect     :account/upsert
+   :value      patch
+   :stake      nil
+   :confidence 0.97})
+
+(defn- verify-compliance
+  "Per-jurisdiction AML/KYC evidence checklist draft. `:no-spec?` injects
+  the failure mode we must defend against: proposing a checklist for a
+  jurisdiction with NO official spec-basis in `pi.facts` -- the
+  PIGovernor must reject this (never invent a jurisdiction's payment-
+  services licensing requirements)."
+  [db {:keys [subject no-spec?]}]
+  (let [a (store/account db subject)
+        iso3 (if no-spec? "ATL" (:jurisdiction a))
+        sb (facts/spec-basis iso3)]
+    (if (nil? sb)
+      {:summary    (str iso3 " の公式spec-basisが見つかりません")
+       :rationale  "pi.facts に未登録の法域。要件を推測で作らない。"
+       :cites      []
+       :effect     :compliance/set
+       :value      {:jurisdiction iso3 :checklist [] :spec-basis nil}
+       :stake      nil
+       :confidence 0.9}
+      {:summary    (str iso3 " (" (:owner-authority sb) ") 向け必要書類 "
+                        (count (:required-evidence sb)) " 件を提案")
+       :rationale  (str "公式ソース: " (:provenance sb) " / 法的根拠: " (:legal-basis sb))
+       :cites      [(:legal-basis sb) (:provenance sb)]
+       :effect     :compliance/set
+       :value      {:jurisdiction iso3
+                    :checklist (:required-evidence sb)
+                    :spec-basis (:provenance sb)
+                    :legal-basis (:legal-basis sb)}
+       :stake      nil
+       :confidence 0.9})))
+
+(defn- screen-sanctions
+  "Sanctions-screening draft. `:sanctions-flag-unresolved?` on the
+  account record injects the failure mode: the PIGovernor must HOLD,
+  un-overridably, on any unresolved flag."
+  [db {:keys [subject]}]
+  (let [a (store/account db subject)]
+    (cond
+      (nil? a)
+      {:summary "対象口座記録が見つかりません" :rationale "no account record"
+       :cites [] :effect :sanctions-screen/set :value {:account-id subject :verdict :unknown}
+       :stake nil :confidence 0.0}
+
+      (true? (:sanctions-flag-unresolved? a))
+      {:summary    (str (:holder-name a) ": 未解決の制裁リストフラグを検出")
+       :rationale  "スクリーニングが未解決の制裁リストフラグを検出。人手確認とホールドが必須。"
+       :cites      [:sanctions-check]
+       :effect     :sanctions-screen/set
+       :value      {:account-id subject :verdict :unresolved}
+       :stake      nil
+       :confidence 0.95}
+
+      :else
+      {:summary    (str (:holder-name a) ": 未解決の制裁リストフラグなし")
+       :rationale  "制裁リストスクリーニング完了、一致なし。"
+       :cites      [:sanctions-check]
+       :effect     :sanctions-screen/set
+       :value      {:account-id subject :verdict :resolved}
+       :stake      nil
+       :confidence 0.9})))
+
+(defn- propose-consent
+  "PIS/AIS consent-registration draft, shared by both kinds. `kind` is
+  `:pis` or `:ais`. Not an actuation -- no funds move, no third-party
+  account is read here -- but it DOES need a real spec-basis citation
+  just like `:compliance/verify`, since the LEGAL BASIS for a PSD2 open-
+  banking consent is jurisdiction-specific just as an AML checklist is."
+  [db {:keys [subject]} kind]
+  (let [a (store/account db subject)
+        sb (facts/spec-basis (:jurisdiction a))
+        effect (if (= kind :pis) :consent/mark-registered-pis :consent/mark-registered-ais)
+        label (if (= kind :pis) "PIS(決済指図伝達サービス)" "AIS(口座情報サービス)")]
+    (if (nil? sb)
+      {:summary    (str (:jurisdiction a) " の公式spec-basisが見つかりません -- " label "同意を登録できません")
+       :rationale  "pi.facts に未登録の法域。同意の法的根拠を推測で作らない。"
+       :cites      []
+       :effect     effect
+       :value      {:jurisdiction (:jurisdiction a) :spec-basis nil}
+       :stake      nil
+       :confidence 0.2}
+      {:summary    (str subject " の " label " 同意登録を提案 (" (:owner-authority sb) ")")
+       :rationale  (str "公式ソース: " (:provenance sb) " / 法的根拠: " (:legal-basis sb))
+       :cites      [(:legal-basis sb) (:provenance sb)]
+       :effect     effect
+       :value      {:jurisdiction (:jurisdiction a)
+                    :spec-basis (:provenance sb)
+                    :legal-basis (:legal-basis sb)}
+       :stake      nil
+       :confidence 0.9})))
+
+(defn- propose-execute-payment
+  "Draft the actual PAYMENT-EXECUTION action -- executing a real payment
+  transaction on a payment account (PSD2 Annex I services 2/3/6). ALWAYS
+  `:stake :actuation/execute-payment` -- this is a REAL-WORLD payment act,
+  never a draft the actor may auto-run. See README `Actuation`: no phase
+  ever adds this op to a phase's `:auto` set (`pi.phase`); the governor
+  also always escalates on `:actuation/execute-payment`. Two independent
+  layers agree, deliberately. `:channel` (nil|:direct|:pis) passes
+  through to the governor's PIS-consent check -- a `:pis`-channel
+  execution against a third-party ASPSP account has a different legal
+  basis (customer consent) than a direct execution on the PI's own
+  customer account."
+  [db {:keys [subject channel]}]
+  (let [a (store/account db subject)]
+    {:summary    (str subject " 向け決済実行提案"
+                      (when a (str " (holder=" (:holder-name a) ", channel=" (or channel :direct) ")")))
+     :rationale  (if a
+                   (str "iban=" (:iban a))
+                   "口座記録が見つかりません")
+     :cites      (if a [subject] [])
+     :effect     :account/mark-executed
+     :value      {:account-id subject}
+     :stake      :actuation/execute-payment
+     :confidence (if (and a (not (registry/iban-checksum-invalid? a))) 0.9 0.3)}))
+
+(defn- propose-remit-payout
+  "Draft the actual REMITTANCE-PAYOUT action -- disbursing a real money-
+  remittance payout to a beneficiary (PSD2 Annex I service 5). ALWAYS
+  `:stake :actuation/remit-payout` -- this is a REAL-WORLD payment act,
+  never a draft the actor may auto-run. See README `Actuation`: no phase
+  ever adds this op to a phase's `:auto` set (`pi.phase`); the governor
+  also always escalates on `:actuation/remit-payout`. Two independent
+  layers agree, deliberately."
+  [db {:keys [subject]}]
+  (let [a (store/account db subject)]
+    {:summary    (str subject " 向け送金実行提案"
+                      (when a (str " (holder=" (:holder-name a) ")")))
+     :rationale  (if a
+                   (str "beneficiary-iban=" (:beneficiary-iban a))
+                   "口座記録が見つかりません")
+     :cites      (if a [subject] [])
+     :effect     :account/mark-remitted
+     :value      {:account-id subject}
+     :stake      :actuation/remit-payout
+     :confidence (if (and a (not (registry/iban-checksum-invalid? {:iban (:beneficiary-iban a)}))) 0.9 0.3)}))
+
+(defn infer
+  "Route a request to the right proposal generator.
+  request: {:op kw :subject id ...op-specific...}"
+  [db {:keys [op] :as request}]
+  (case op
+    :account/intake              (normalize-intake db request)
+    :compliance/verify           (verify-compliance db request)
+    :sanctions/screen            (screen-sanctions db request)
+    :consent/register-pis        (propose-consent db request :pis)
+    :consent/register-ais        (propose-consent db request :ais)
+    :actuation/execute-payment   (propose-execute-payment db request)
+    :actuation/remit-payout      (propose-remit-payout db request)
+    {:summary "未対応の操作" :rationale (str op) :cites []
+     :effect :noop :stake nil :confidence 0.0}))
+
+;; ----------------------------- Advisor protocol -----------------------------
+
+(defprotocol Advisor
+  (-advise [advisor store request] "store + request -> proposal map"))
+
+(defn mock-advisor
+  "The deterministic advisor (the `infer` logic above). Default everywhere."
+  []
+  (reify Advisor (-advise [_ st req] (infer st req))))
+
+(def ^:private system-prompt
+  (str "あなたは決済機関(Payment Institution)の決済実行・送金実行エージェントの助言者です。"
+       "与えられた事実のみに基づき、提案を1つだけEDNマップで返します。説明や前置きは"
+       "一切書かず、EDNだけを出力します。\n"
+       "キー: :summary(人向けドラフト) :rationale(根拠/必ず事実から) "
+       ":cites(使った事実キーのベクタ) "
+       ":effect(:account/upsert|:compliance/set|:sanctions-screen/set|"
+       ":consent/mark-registered-pis|:consent/mark-registered-ais|"
+       ":account/mark-executed|:account/mark-remitted) "
+       ":stake(:actuation/execute-payment か :actuation/remit-payout か nil) :confidence(0..1)。\n"
+       "重要: 登録されていない法域の要件を絶対に創作してはいけません。"
+       "spec-basisが無い場合は :cites を空にし confidence を上げないこと。"))
+
+(defn- facts-for [st {:keys [op subject]}]
+  (case op
+    :compliance/verify           {:account (store/account st subject)}
+    :sanctions/screen            {:account (store/account st subject)}
+    :consent/register-pis        {:account (store/account st subject)}
+    :consent/register-ais        {:account (store/account st subject)}
+    :actuation/execute-payment   {:account (store/account st subject)}
+    :actuation/remit-payout      {:account (store/account st subject)}
+    {:account (store/account st subject)}))
+
+(defn- parse-proposal
+  "Parse the model's EDN proposal defensively. Any parse/shape failure
+  yields a safe low-confidence noop so the PIGovernor escalates/holds --
+  an LLM hiccup can never auto-execute a payment or auto-remit a payout."
+  [content]
+  (let [p (try (edn/read-string (str/trim (str content)))
+               (catch #?(:clj Exception :cljs :default) _ nil))]
+    (if (map? p)
+      (-> p
+          (update :cites #(vec (or % [])))
+          (update :confidence #(if (number? %) (double %) 0.0))
+          (update :effect #(or % :noop)))
+      {:summary "LLM応答を解釈できませんでした" :rationale (str content)
+       :cites [] :effect :noop :stake nil :confidence 0.0})))
+
+(defn llm-advisor
+  "An advisor backed by a `langchain.model/ChatModel` (real inference)."
+  ([chat-model] (llm-advisor chat-model {}))
+  ([chat-model gen-opts]
+   (reify Advisor
+     (-advise [_ st req]
+       (let [msgs [{:role :system :content system-prompt}
+                   {:role :user :content (str "操作: " (:op req)
+                                              "\n対象: " (:subject req)
+                                              "\n事実: " (pr-str (facts-for st req)))}]
+             resp (model/-generate chat-model msgs gen-opts)]
+         (parse-proposal (:content resp)))))))
+
+(defn trace
+  "Decision-grounded audit record -- persisted to the :audit channel."
+  [request proposal]
+  {:t          :piadvisor-proposal
+   :op         (:op request)
+   :subject    (:subject request)
+   :summary    (:summary proposal)
+   :rationale  (:rationale proposal)
+   :cites      (:cites proposal)
+   :confidence (:confidence proposal)})

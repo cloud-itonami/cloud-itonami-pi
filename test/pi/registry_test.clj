@@ -1,0 +1,68 @@
+(ns pi.registry-test
+  "Conformance tests for `pi.registry` -- the ISO 7064 MOD 97-10 IBAN
+  checksum re-implementation and the payment-execution/remittance-payout/
+  consent draft-record builders."
+  (:require [clojure.test :refer [deftest is]]
+            [pi.registry :as r]))
+
+(deftest certificate-is-a-draft-not-a-real-execution
+  (let [result (r/register-payment-execution "account-1" "JPN" 1)]
+    (is (nil? (get-in result ["certificate" "proof"])))
+    (is (= (get-in result ["certificate" "issued_by_registry"]) false))
+    (is (= (get-in result ["certificate" "status"]) "draft-unsigned"))))
+
+(deftest real-bundesbank-iban-test-vector-passes-checksum
+  (is (not (r/iban-checksum-invalid? {:iban "DE89370400440532013000"}))))
+
+(deftest corrupted-iban-fails-checksum
+  (is (r/iban-checksum-invalid? {:iban "DE89370400440532013099"})))
+
+(deftest nil-and-malformed-iban-fail-checksum
+  (is (r/iban-checksum-invalid? {:iban nil}))
+  (is (r/iban-checksum-invalid? {:iban "NOT-AN-IBAN"}))
+  (is (r/iban-checksum-invalid? {:iban "DE8937040044053201300099999999999999999"})))
+
+(deftest payment-execution-assigns-a-sequenced-execution-number
+  (let [result (r/register-payment-execution "account-1" "JPN" 7)]
+    (is (= (get result "execution_number") "JPN-PMT-000007"))
+    (is (= (get-in result ["record" "immutable"]) true))
+    (is (= (get-in result ["record" "kind"]) "payment-execution-draft"))))
+
+(deftest payment-execution-validation-rules
+  (is (thrown? Exception (r/register-payment-execution "" "JPN" 1)))
+  (is (thrown? Exception (r/register-payment-execution "account-1" "" 1)))
+  (is (thrown? Exception (r/register-payment-execution "account-1" "JPN" -1))))
+
+(deftest remittance-payout-assigns-a-sequenced-payout-number
+  (let [result (r/register-remittance-payout "account-1" "JPN" 3)]
+    (is (= (get result "payout_number") "JPN-REM-000003"))
+    (is (= (get-in result ["record" "kind"]) "remittance-payout-draft"))))
+
+(deftest remittance-payout-validation-rules
+  (is (thrown? Exception (r/register-remittance-payout "" "JPN" 1)))
+  (is (thrown? Exception (r/register-remittance-payout "account-1" "" 1)))
+  (is (thrown? Exception (r/register-remittance-payout "account-1" "JPN" -1))))
+
+(deftest consent-assigns-a-sequenced-consent-number-per-kind
+  (let [pis (r/register-consent "account-1" :pis "JPN" 0)
+        ais (r/register-consent "account-1" :ais "JPN" 0)]
+    (is (= (get pis "consent_number") "JPN-PIS-000000"))
+    (is (= (get ais "consent_number") "JPN-AIS-000000"))
+    (is (= (get-in pis ["record" "kind"]) "pis-consent-draft"))
+    (is (= (get-in ais ["record" "kind"]) "ais-consent-draft"))))
+
+(deftest consent-validation-rules
+  (is (thrown? Exception (r/register-consent "" :pis "JPN" 0)))
+  (is (thrown? Exception (r/register-consent "account-1" :bogus "JPN" 0)))
+  (is (thrown? Exception (r/register-consent "account-1" :pis "" 0)))
+  (is (thrown? Exception (r/register-consent "account-1" :pis "JPN" -1))))
+
+(deftest history-is-append-only
+  (let [exec1 (r/register-payment-execution "account-1" "JPN" 0)
+        hist (r/append [] exec1)
+        exec2 (r/register-payment-execution "account-2" "JPN" 1)
+        hist2 (r/append hist exec2)]
+    (is (= 1 (count hist)))
+    (is (= 2 (count hist2)))
+    (is (= (get-in hist2 [0 "record_id"]) "JPN-PMT-000000"))
+    (is (= (get-in hist2 [1 "record_id"]) "JPN-PMT-000001"))))

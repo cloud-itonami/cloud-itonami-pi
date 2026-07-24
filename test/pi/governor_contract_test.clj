@@ -1,0 +1,209 @@
+(ns pi.governor-contract-test
+  "The governor contract as executable tests -- the payment-institution
+  analog of `cloud-itonami-isic-6419`'s `banking.governor-contract-test` /
+  `cloud-itonami-isic-6910`'s `formation.governor-contract-test`. The
+  single invariant under test:
+
+    PaymentOps-LLM never executes/remits a record the PIGovernor would
+    reject, `:actuation/execute-payment`/`:actuation/remit-payout` NEVER
+    auto-commit at any phase, and every decision (commit OR hold) leaves
+    exactly one ledger fact."
+  (:require [clojure.test :refer [deftest is testing]]
+            [langgraph.graph :as g]
+            [pi.store :as store]
+            [pi.governor :as governor]
+            [pi.operation :as op]))
+
+(defn- fresh []
+  (let [db (store/seed-db)]
+    [db (op/build db)]))
+
+(def operator {:actor-id "op-1" :actor-role :pi-operator :phase 3})
+
+(defn- exec-op [actor tid request context]
+  (g/run* actor {:request request :context context} {:thread-id tid}))
+
+(defn- approve! [actor tid]
+  (g/run* actor {:approval {:status :approved :by "op-1"}} {:thread-id tid :resume? true}))
+
+(defn- qualify-account!
+  "Drive `account-id` through compliance/verify -> approve, sanctions/
+  screen -> approve. Shared setup for the actuation tests below."
+  [actor account-id]
+  (exec-op actor (str "setup-a-" account-id) {:op :compliance/verify :subject account-id} operator)
+  (approve! actor (str "setup-a-" account-id))
+  (exec-op actor (str "setup-b-" account-id) {:op :sanctions/screen :subject account-id} operator)
+  (approve! actor (str "setup-b-" account-id)))
+
+(deftest clean-intake-auto-commits
+  (let [[db actor] (fresh)
+        res (exec-op actor "t1"
+                  {:op :account/intake :subject "account-1"
+                   :patch {:id "account-1" :status :ready}} operator)]
+    (is (= :commit (get-in res [:state :disposition])))
+    (is (= :ready (:status (store/account db "account-1"))) "SSoT actually updated")
+    (is (= 1 (count (store/ledger db))))))
+
+(deftest compliance-verify-always-needs-approval
+  (testing "compliance/verify is never in any phase's :auto set -- always human approval, even when clean"
+    (let [[db actor] (fresh)
+          res (exec-op actor "t2" {:op :compliance/verify :subject "account-1"} operator)]
+      (is (= :interrupted (:status res)))
+      (let [r2 (approve! actor "t2")]
+        (is (= :commit (get-in r2 [:state :disposition])))
+        (is (some? (store/compliance-of db "account-1")))))))
+
+(deftest fabricated-jurisdiction-is-held
+  (testing "a compliance/verify proposal with no official spec-basis -> HOLD, never reaches a human"
+    (let [[db actor] (fresh)
+          res (exec-op actor "t3"
+                    {:op :compliance/verify :subject "account-1" :no-spec? true} operator)]
+      (is (= :hold (get-in res [:state :disposition])))
+      (is (some #{:no-spec-basis} (-> (store/ledger db) first :basis)))
+      (is (nil? (store/compliance-of db "account-1")) "no compliance assessment written"))))
+
+(deftest sanctions-hit-is-held-and-unoverridable
+  (testing "an unresolved sanctions flag -> HOLD, and never reaches request-approval"
+    (let [[db actor] (fresh)
+          res (exec-op actor "t4" {:op :sanctions/screen :subject "account-4"} operator)]
+      (is (= :hold (get-in res [:state :disposition])) "settles immediately, no interrupt")
+      (is (not= :interrupted (:status res)))
+      (is (some #{:sanctions-flag-unresolved} (-> (store/ledger db) first :basis)))
+      (is (nil? (store/sanctions-screen-of db "account-4")) "no sanctions clearance written"))))
+
+(deftest execute-payment-without-compliance-is-held
+  (testing "actuation/execute-payment before any compliance verification -> HOLD (evidence-incomplete)"
+    (let [[db actor] (fresh)
+          res (exec-op actor "t5" {:op :actuation/execute-payment :subject "account-1"} operator)]
+      (is (= :hold (get-in res [:state :disposition])))
+      (is (some #{:evidence-incomplete} (-> (store/ledger db) first :basis))))))
+
+(deftest execute-payment-with-corrupted-iban-is-held
+  (testing "account-3's IBAN is deliberately corrupted -- even fully qualified, execution is HELD un-overridably"
+    (let [[db actor] (fresh)]
+      (qualify-account! actor "account-3")
+      (let [res (exec-op actor "t6" {:op :actuation/execute-payment :subject "account-3"} operator)]
+        (is (= :hold (get-in res [:state :disposition])) "settles immediately, no interrupt")
+        (is (not= :interrupted (:status res)))
+        (is (some #{:iban-checksum-invalid} (-> (store/ledger db) last :basis)))))))
+
+(deftest execute-payment-always-escalates-then-human-decides
+  (testing "a clean, fully-qualified execution still ALWAYS interrupts for human approval -- actuation is never auto"
+    (let [[db actor] (fresh)]
+      (qualify-account! actor "account-1")
+      (let [r1 (exec-op actor "t7" {:op :actuation/execute-payment :subject "account-1"} operator)]
+        (is (= :interrupted (:status r1)) "pauses for human approval even when governor-clean")
+        (let [r2 (approve! actor "t7")]
+          (is (= :commit (get-in r2 [:state :disposition])))
+          (is (true? (:payment-executed? (store/account db "account-1"))))
+          (is (= 1 (count (store/payment-execution-history db))) "one draft execution record"))))))
+
+(deftest execute-payment-reject-holds-nothing-executed
+  (let [[db actor] (fresh)]
+    (qualify-account! actor "account-1")
+    (exec-op actor "t8" {:op :actuation/execute-payment :subject "account-1"} operator)
+    (let [r2 (g/run* actor {:approval {:status :rejected :by "op-1"}}
+                     {:thread-id "t8" :resume? true})]
+      (is (= :hold (get-in r2 [:state :disposition])))
+      (is (empty? (store/payment-execution-history db)) "nothing executed on reject"))))
+
+(deftest double-execution-is-held
+  (testing "an already-executed account cannot be executed again -> HOLD, un-overridable"
+    (let [[db actor] (fresh)]
+      (qualify-account! actor "account-1")
+      (exec-op actor "t9a" {:op :actuation/execute-payment :subject "account-1"} operator)
+      (approve! actor "t9a")
+      (let [history-after-first (store/payment-execution-history db)
+            res (exec-op actor "t9b" {:op :actuation/execute-payment :subject "account-1"} operator)]
+        (is (= :hold (get-in res [:state :disposition])) "settles immediately, no interrupt")
+        (is (not= :interrupted (:status res)))
+        (is (some #{:already-executed} (-> (store/ledger db) last :basis)))
+        (is (= history-after-first (store/payment-execution-history db))
+            "no second execution record appended")))))
+
+(deftest remit-payout-always-escalates-then-human-decides
+  (testing "a clean, fully-qualified remittance payout still ALWAYS interrupts -- actuation is never auto"
+    (let [[db actor] (fresh)]
+      (qualify-account! actor "account-1")
+      (let [r1 (exec-op actor "t10" {:op :actuation/remit-payout :subject "account-1"} operator)]
+        (is (= :interrupted (:status r1)) "pauses for human approval even when governor-clean")
+        (let [r2 (approve! actor "t10")]
+          (is (= :commit (get-in r2 [:state :disposition])))
+          (is (true? (:remittance-payout-posted? (store/account db "account-1"))))
+          (is (= 1 (count (store/remittance-payout-history db)))))))))
+
+(deftest double-remittance-is-held
+  (testing "an already-remitted account cannot be paid out again -> HOLD, un-overridable"
+    (let [[db actor] (fresh)]
+      (qualify-account! actor "account-1")
+      (exec-op actor "t11a" {:op :actuation/remit-payout :subject "account-1"} operator)
+      (approve! actor "t11a")
+      (let [res (exec-op actor "t11b" {:op :actuation/remit-payout :subject "account-1"} operator)]
+        (is (= :hold (get-in res [:state :disposition])))
+        (is (some #{:already-remitted} (-> (store/ledger db) last :basis)))))))
+
+(deftest pis-channel-execution-without-consent-is-held
+  (testing "a PIS-channel execution with no PIS consent on file -> HOLD, un-overridable -- PSD2's whole legal
+            basis for a PIS-initiated payment IS the customer's explicit consent"
+    (let [[db actor] (fresh)]
+      (qualify-account! actor "account-1")
+      (let [res (exec-op actor "t12" {:op :actuation/execute-payment :subject "account-1" :channel :pis} operator)]
+        (is (= :hold (get-in res [:state :disposition])) "settles immediately, no interrupt")
+        (is (not= :interrupted (:status res)))
+        (is (some #{:pis-consent-missing} (-> (store/ledger db) last :basis)))))))
+
+(deftest pis-channel-execution-with-registered-consent-proceeds-to-escalation
+  (testing "once a PIS consent is registered and approved, the same PIS-channel execution escalates normally"
+    (let [[db actor] (fresh)]
+      (qualify-account! actor "account-1")
+      (exec-op actor "t13a" {:op :consent/register-pis :subject "account-1"} operator)
+      (approve! actor "t13a")
+      (is (= :active (:status (store/consent-of db "account-1" :pis))))
+      (let [res (exec-op actor "t13" {:op :actuation/execute-payment :subject "account-1" :channel :pis} operator)]
+        (is (= :interrupted (:status res)) "no longer held -- proceeds to normal actuation escalation")
+        (let [r2 (approve! actor "t13")]
+          (is (= :commit (get-in r2 [:state :disposition]))))))))
+
+(deftest direct-channel-execution-needs-no-pis-consent
+  (testing "a direct-channel execution (the PI's own customer, own payment account) needs no PIS consent at all"
+    (let [[db actor] (fresh)]
+      (qualify-account! actor "account-1")
+      (let [res (exec-op actor "t14" {:op :actuation/execute-payment :subject "account-1"} operator)]
+        (is (= :interrupted (:status res)))
+        (is (nil? (store/consent-of db "account-1" :pis)))))))
+
+(deftest effect-mismatch-is-held-before-any-op-specific-check-runs
+  (testing "a proposal whose :effect does not match the request's :op is a HARD violation, checked FIRST"
+    (let [[db _actor] (fresh)
+          bogus-proposal {:summary "s" :rationale "r" :cites ["x"]
+                          :effect :account/mark-executed :value {} :stake nil :confidence 0.95}
+          v (governor/check {:op :compliance/verify :subject "account-1"} operator bogus-proposal db)]
+      (is (:hard? v))
+      (is (some #{:effect-mismatch} (map :rule (:violations v)))))))
+
+(deftest every-decision-leaves-one-ledger-fact
+  (testing "write-only-through-ledger: N operations -> N ledger facts"
+    (let [[db actor] (fresh)]
+      (exec-op actor "a" {:op :account/intake :subject "account-1"
+                          :patch {:id "account-1" :status :ready}} operator)
+      (exec-op actor "b" {:op :compliance/verify :subject "account-1" :no-spec? true} operator)
+      (is (= 2 (count (store/ledger db)))
+          "one commit + one hold, both recorded"))))
+
+(deftest auto-committed-ledger-fact-has-no-fabricated-approver
+  (testing "an AUTO-commit (phase 3's :account/intake, no human ever in the loop) must not invent an approver"
+    (let [[db actor] (fresh)]
+      (exec-op actor "t15" {:op :account/intake :subject "account-1"
+                            :patch {:id "account-1" :status :ready}} operator)
+      (is (nil? (:approved-by (last (store/ledger db))))))))
+
+(deftest committed-ledger-fact-records-the-actual-approver
+  (testing "a human-approved execution's ledger fact records WHO approved it, not just that someone did"
+    (let [[db actor] (fresh)]
+      (qualify-account! actor "account-1")
+      (exec-op actor "t16" {:op :actuation/execute-payment :subject "account-1"} operator)
+      (let [r2 (g/run* actor {:approval {:status :approved :by "supervisor-9"}}
+                       {:thread-id "t16" :resume? true})]
+        (is (= :commit (get-in r2 [:state :disposition])))
+        (is (= "supervisor-9" (:approved-by (last (store/ledger db))))
+            "the approver, not the original requester's actor-id")))))

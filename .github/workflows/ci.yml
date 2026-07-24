@@ -1,0 +1,48 @@
+name: ci
+
+# This project is a west project in the com-junkawasaki/root superproject; its
+# deps reference a sibling repo via :local/root
+# (../../com-junkawasaki/langgraph-clj, .../langchain-clj). Both PUBLIC, so
+# the test job reconstructs the workspace layout by checking them out into
+# the expected relative paths -- no token needed. Same pattern as
+# cloud-itonami-isic-6419 / -6910's ci.yml.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "21" }
+      - uses: DeLaGuardo/setup-clojure@13.0
+        with: { cli: latest }
+      - name: clj-kondo (errors fail the build)
+        run: clojure -M:lint
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # lay the west workspace out so ../../com-junkawasaki/* resolves
+      - uses: actions/checkout@v4
+        with: { path: orgs/cloud-itonami/cloud-itonami-pi }
+      - uses: actions/checkout@v4
+        with:
+          repository: com-junkawasaki/langgraph-clj
+          path: orgs/com-junkawasaki/langgraph-clj
+      - uses: actions/checkout@v4
+        with:
+          repository: com-junkawasaki/langchain-clj
+          path: orgs/com-junkawasaki/langchain-clj
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "21" }
+      - uses: DeLaGuardo/setup-clojure@13.0
+        with: { cli: latest }
+      - name: test (governor contract · phase invariants · registry conformance · facts coverage · store contract · llm advisor)
+        working-directory: orgs/cloud-itonami/cloud-itonami-pi
+        run: clojure -M:dev:test

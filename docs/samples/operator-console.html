@@ -1,0 +1,94 @@
+<html><head><meta charset="utf-8"><title>cloud-itonami-pi &middot; Payment Institution (PSD2 Annex I)</title><style>
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.ok { color: #137a3f; }
+body { font-family: system-ui,-apple-system,sans-serif; margin: 0; color: #1a1a1a; background: #fafafa; }
+header.bar { display: flex; align-items: center; gap: 12px; padding: 12px 20px; background: #fff; border-bottom: 1px solid #e5e5e5; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #f0f0f0; }
+h2 { margin-top: 0; font-size: 15px; }
+.warn { color: #b25c00; background: #fff8e1; padding: 2px 6px; border-radius: 4px; }
+main { max-width: 980px; margin: 24px auto; padding: 0 20px; }
+header.bar h1 { font-size: 18px; margin: 0; font-weight: 600; }
+.muted { color: #888; font-size: 13px; }
+.critical { color: #fff; background: #b3261e; padding: 2px 6px; border-radius: 4px; font-weight: 600; }
+.card { background: #fff; border: 1px solid #e5e5e5; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+.err { color: #b3261e; background: #fbe9e7; padding: 2px 6px; border-radius: 4px; }
+th { font-weight: 600; color: #555; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+header.bar .badge { margin-left: auto; font-size: 12px; color: #666; }
+code { font-size: 12px; background: #f4f4f4; padding: 1px 4px; border-radius: 3px; }
+</style></head><body>
+<header class="bar">
+  <h1>Payment Institution Actor (PSD2 Annex I) — Operator Console</h1>
+  <span class="badge">read-only sample · governor-gated · execution/remittance always human-approved</span>
+</header>
+<main>
+  <section class="card">
+    <h2>Accounts</h2>
+    <p class="muted">Demo snapshot from <code>pi.store/seed-db</code> after one full demo run (<code>clojure -M:dev:run</code>).</p>
+    <table>
+      <thead><tr><th>Account</th><th>Holder</th><th>Jurisdiction</th><th>IBAN</th><th>Sanctions</th><th>Executed</th><th>Remitted</th><th>Last op status</th></tr></thead>
+      <tbody>
+        <tr><td>account-1</td><td>Sato Ichiro</td><td>JPN</td><td><code>DE89370400440532013000</code></td><td><span class="ok">clear</span></td><td><span class="ok">yes</span></td><td><span class="ok">yes</span></td><td><span class="ok">committed</span></td></tr>
+        <tr><td>account-2</td><td>Atlantis Doe</td><td>ATL</td><td><code>DE89370400440532013000</code></td><td><span class="ok">clear</span></td><td><span class="muted">no</span></td><td><span class="muted">no</span></td><td><span class="critical">HARD hold &middot; no-spec-basis</span></td></tr>
+        <tr><td>account-3</td><td>鈴木健太</td><td>GBR</td><td><code>DE89370400440532013099</code> <span class="warn">checksum-invalid</span></td><td><span class="ok">clear</span></td><td><span class="muted">no</span></td><td><span class="muted">no</span></td><td><span class="critical">HARD hold &middot; iban-checksum-invalid</span></td></tr>
+        <tr><td>account-4</td><td>田中麻衣</td><td>JPN</td><td><code>DE89370400440532013000</code></td><td><span class="critical">unresolved flag</span></td><td><span class="muted">no</span></td><td><span class="muted">no</span></td><td><span class="critical">HARD hold &middot; sanctions-flag-unresolved</span></td></tr>
+      </tbody>
+    </table>
+  </section>
+  <section class="card">
+    <h2>PIS/AIS consents</h2>
+    <p class="muted">Registered consent status per account. PSD2's legal basis for a PIS-initiated payment IS the customer's explicit consent.</p>
+    <table>
+      <thead><tr><th>Account</th><th>Kind</th><th>Status</th><th>Consent number</th></tr></thead>
+      <tbody>
+        <tr><td>account-1</td><td>PIS</td><td><span class="ok">active</span></td><td><code>JPN-PIS-000000</code></td></tr>
+        <tr><td>account-3</td><td>PIS</td><td><span class="warn">not registered</span></td><td><span class="muted">n/a</span></td></tr>
+      </tbody>
+    </table>
+  </section>
+  <section class="card">
+    <h2>Draft payment-execution / remittance-payout records</h2>
+    <p class="muted">Unsigned drafts only — the operator's own act of executing/remitting is outside this actor's authority (see README <code>Actuation</code>). Append-only.</p>
+    <table>
+      <thead><tr><th>Kind</th><th>Record id</th><th>Account</th><th>Jurisdiction</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr><td>payment-execution</td><td>JPN-PMT-000000</td><td>account-1</td><td>JPN</td><td><span class="ok">immutable draft</span></td></tr>
+        <tr><td>remittance-payout</td><td>JPN-REM-000000</td><td>account-1</td><td>JPN</td><td><span class="ok">immutable draft</span></td></tr>
+      </tbody>
+    </table>
+  </section>
+  <section class="card">
+    <h2>Action gate (PIGovernor)</h2>
+    <p class="muted">HARD holds cannot be overridden by a human approver. Spec-basis, evidence completeness, IBAN checksum, sanctions status and PIS-consent presence are independently recomputed, never trusted from the advisor's proposal; a real payment execution or remittance payout is always a human operator's call, at every rollout phase.</p>
+    <table>
+      <thead><tr><th>Op</th><th>Gate</th></tr></thead>
+      <tbody>
+        <tr><td><code>:account/intake</code></td><td><span class="ok">phase-3 auto-commit when clean, no actuation yet -- the ONLY auto-eligible op in this domain, at any phase</span></td></tr>
+        <tr><td><code>:compliance/verify</code></td><td><span class="warn">ALWAYS human approval &middot; spec-basis independently checked against <code>pi.facts</code>, never fabricated</span></td></tr>
+        <tr><td><code>:sanctions/screen</code></td><td><span class="warn">ALWAYS human approval when clean &middot; an unresolved sanctions flag is a HARD, un-overridable hold instead</span></td></tr>
+        <tr><td><code>:consent/register-pis</code> / <code>:consent/register-ais</code></td><td><span class="warn">ALWAYS human approval &middot; requires a real spec-basis citation, never fabricated</span></td></tr>
+        <tr><td><code>:actuation/execute-payment</code></td><td><span class="warn">ALWAYS human approval &middot; real payment execution (actuation) &middot; evidence-completeness + IBAN checksum + sanctions + (PIS channel) consent independently verified, never auto at any phase</span></td></tr>
+        <tr><td><code>:actuation/remit-payout</code></td><td><span class="warn">ALWAYS human approval &middot; real remittance payout (actuation) &middot; double-payout guard independently enforced, never auto at any phase</span></td></tr>
+      </tbody>
+    </table>
+  </section>
+  <section class="card">
+    <h2>Audit ledger (this run)</h2>
+    <p class="muted">Append-only decision-fact log — every proposal, hold and commit this scenario produced.</p>
+    <table>
+      <thead><tr><th>Fact</th><th>Op</th><th>Subject</th><th>Basis</th></tr></thead>
+      <tbody>
+        <tr><td>committed</td><td>:account/intake</td><td>account-1</td><td><span class="muted">-</span></td></tr>
+        <tr><td>committed</td><td>:compliance/verify</td><td>account-1</td><td><span class="muted">-</span></td></tr>
+        <tr><td>committed</td><td>:sanctions/screen</td><td>account-1</td><td><span class="muted">-</span></td></tr>
+        <tr><td>committed</td><td>:consent/register-pis</td><td>account-1</td><td><span class="muted">-</span></td></tr>
+        <tr><td>committed</td><td>:actuation/execute-payment</td><td>account-1</td><td><span class="muted">-</span></td></tr>
+        <tr><td>committed</td><td>:actuation/remit-payout</td><td>account-1</td><td><span class="muted">-</span></td></tr>
+        <tr><td>hold</td><td>:actuation/execute-payment</td><td>account-1</td><td><code>already-executed</code></td></tr>
+        <tr><td>hold</td><td>:sanctions/screen</td><td>account-4</td><td><code>sanctions-flag-unresolved</code></td></tr>
+        <tr><td>hold</td><td>:compliance/verify</td><td>account-2</td><td><code>no-spec-basis</code></td></tr>
+        <tr><td>hold</td><td>:actuation/execute-payment</td><td>account-3</td><td><code>evidence-incomplete</code></td></tr>
+      </tbody>
+    </table>
+  </section>
+</main>
+</body></html>

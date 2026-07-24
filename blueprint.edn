@@ -1,0 +1,10 @@
+{:itonami.blueprint/id "cloud-itonami-pi"
+ :itonami.blueprint/name "Payment Institution"
+ :itonami.blueprint/domain :finance/payment-services
+ :itonami.blueprint/license "AGPL-3.0-or-later"
+ :itonami.blueprint/social-impact [:open-banking-access :financial-inclusion :data-sovereignty :transparency]
+ :itonami.blueprint/governor :pi-governor
+ :itonami.blueprint/robotics false
+ :itonami.blueprint/required-technologies [:identity :forms :dmn :bpmn :audit-ledger :open-banking]
+ :itonami.blueprint/optional-technologies [:corporate-intelligence]
+ :itonami.blueprint/status :public-oss}

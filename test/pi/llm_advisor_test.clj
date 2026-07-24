@@ -1,0 +1,103 @@
+(ns pi.llm-advisor-test
+  "The real-inference advisor (langchain.model ChatModel), driven offline
+  by langchain's mock-model. Proves: a real LLM proposal is parsed, still
+  fully censored by the PIGovernor, and that an unparseable/garbage
+  response -- or one that fabricates a jurisdiction's requirements, or
+  one that answers a harmless-looking request with a mismatched,
+  higher-stakes :effect -- can never auto-execute a payment or
+  auto-remit a payout."
+  (:require [clojure.test :refer [deftest is testing]]
+            [langgraph.graph :as g]
+            [langchain.model :as model]
+            [pi.piadvisor :as piadvisor]
+            [pi.governor :as governor]
+            [pi.store :as store]
+            [pi.operation :as op]))
+
+(def operator {:actor-id "op-1" :actor-role :pi-operator :phase 3})
+(def verify-req {:op :compliance/verify :subject "account-1"})
+
+(defn- advise-with [req content]
+  (piadvisor/-advise (piadvisor/llm-advisor (model/mock-model [{:role :assistant :content content}]))
+                     (store/seed-db) req))
+
+(deftest clean-llm-compliance-verification-is-parsed-and-accepted
+  (let [p (advise-with verify-req
+                       (str "{:summary \"JPN 向け必要書類を提案\" :rationale \"FSAの公式ソースに基づく\" "
+                            ":cites [\"資金決済に関する法律\" \"https://www.fsa.go.jp/\"] "
+                            ":effect :compliance/set "
+                            ":value {:jurisdiction \"JPN\" :checklist [] :spec-basis \"https://www.fsa.go.jp/\"} "
+                            ":stake nil :confidence 0.9}"))]
+    (is (= :compliance/set (:effect p)))
+    (is (seq (:cites p)))
+    (is (= 0.9 (:confidence p)))
+    (testing "the governor accepts a proposal that actually cites a spec-basis"
+      (is (:ok? (governor/check verify-req operator p (store/seed-db)))))))
+
+(deftest llm-fabricating-a-jurisdiction-is-rejected
+  (testing "even a confident LLM can't invent a jurisdiction's payment-services requirements -- spec-basis gate holds"
+    (let [p (advise-with verify-req
+                         (str "{:summary \"ATL 向け必要書類を提案\" :rationale \"一般的な慣行に基づく推測\" "
+                              ":cites [] :effect :compliance/set "
+                              ":value {:jurisdiction \"ATL\" :checklist [\"some doc\"]} "
+                              ":confidence 0.95}"))
+          v (governor/check verify-req operator p (store/seed-db))]
+      (is (:hard? v))
+      (is (some #{:no-spec-basis} (map :rule (:violations v)))))))
+
+(deftest llm-declaring-a-sanctions-hit-is-unoverridable
+  (testing "an LLM-reported sanctions hit still forces HOLD, regardless of confidence"
+    (let [p (advise-with {:op :sanctions/screen :subject "account-1"}
+                         (str "{:summary \"制裁リスト一致\" :rationale \"screening provider hit\" "
+                              ":cites [:sanctions-check] :effect :sanctions-screen/set "
+                              ":value {:account-id \"account-1\" :verdict :unresolved} :confidence 0.98}"))
+          v (governor/check {:op :sanctions/screen :subject "account-1"} operator p (store/seed-db))]
+      (is (:hard? v))
+      (is (some #{:sanctions-flag-unresolved} (map :rule (:violations v)))))))
+
+(deftest unparseable-llm-output-never-auto-commits
+  (testing "garbage / refusal -> safe noop at confidence 0 -> governor won't pass it"
+    (let [p (advise-with verify-req "申し訳ございませんが、その法域についてはお答えできません。")]
+      (is (= :noop (:effect p)))
+      (is (= 0.0 (:confidence p)))
+      (is (not (:ok? (governor/check verify-req operator p (store/seed-db))))))))
+
+(deftest llm-answering-a-verification-request-with-an-execution-effect-is-rejected
+  (testing "a harmless-looking :compliance/verify request answered with :effect
+            :account/mark-executed -- even with plausible cites and high confidence --
+            is a HARD violation, not just a low-confidence escalation"
+    (let [p (advise-with verify-req
+                         (str "{:summary \"JPN 向け必要書類を提案\" :rationale \"FSAの公式ソースに基づく\" "
+                              ":cites [\"資金決済に関する法律\" \"https://www.fsa.go.jp/\"] "
+                              ":effect :account/mark-executed "
+                              ":value {:account-id \"account-1\"} "
+                              ":stake nil :confidence 0.95}"))
+          v (governor/check verify-req operator p (store/seed-db))]
+      (is (:hard? v))
+      (is (some #{:effect-mismatch} (map :rule (:violations v)))))))
+
+(deftest effect-mismatch-cannot-actually-execute-through-the-full-actor-graph
+  (testing "end-to-end reproduction: a :compliance/verify request whose LLM proposal declares
+            :effect :account/mark-executed must HOLD outright (no interrupt, no approval step
+            at all) and leave the account completely untouched -- not merely fail a unit check.
+            Before this class of fix (see pi.governor's `op->effect` docstring, and cloud-
+            itonami-isic-6910's ADR-0001 Addendum 12), an approver who thought they were
+            approving a routine compliance check could silently trigger a real payment
+            execution with none of :actuation/execute-payment's own scrutiny ever run."
+    (let [db (store/seed-db)
+          before (store/account db "account-1")
+          advisor (piadvisor/llm-advisor
+                   (model/mock-model
+                    [{:role :assistant
+                      :content (str "{:summary \"JPN 向け必要書類を提案\" :rationale \"FSAの公式ソースに基づく\" "
+                                    ":cites [\"資金決済に関する法律\" \"https://www.fsa.go.jp/\"] "
+                                    ":effect :account/mark-executed "
+                                    ":value {:account-id \"account-1\"} "
+                                    ":stake nil :confidence 0.95}")}]))
+          actor (op/build db {:advisor advisor})
+          res (g/run* actor {:request verify-req :context operator} {:thread-id "exploit"})]
+      (is (= :done (:status res)) "settles immediately -- never even reaches request-approval")
+      (is (= :hold (get-in res [:state :disposition])))
+      (is (= before (store/account db "account-1")) "account completely unchanged")
+      (is (empty? (store/payment-execution-history db)) "nothing executed")
+      (is (nil? (store/compliance-of db "account-1")) "no compliance assessment written either"))))
