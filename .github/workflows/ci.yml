@@ -33,12 +33,12 @@ jobs:
         with: { path: orgs/cloud-itonami/cloud-itonami-pi }
       - uses: actions/checkout@v4
         with:
-          repository: com-junkawasaki/langgraph-clj
-          path: orgs/com-junkawasaki/langgraph-clj
+          repository: kotoba-lang/langgraph
+          path: orgs/kotoba-lang/langgraph
       - uses: actions/checkout@v4
         with:
-          repository: com-junkawasaki/langchain-clj
-          path: orgs/com-junkawasaki/langchain-clj
+          repository: kotoba-lang/langchain
+          path: orgs/kotoba-lang/langchain
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: "21" }
       - uses: DeLaGuardo/setup-clojure@13.0
