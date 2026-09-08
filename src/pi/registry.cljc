@@ -32,7 +32,7 @@
   executing the payment or dispatching the remittance payout itself (that
   is `pi.operation`'s `:actuation/execute-payment`/`:actuation/remit-
   payout`, always human-gated -- see README `Actuation`)."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (defn- unsigned-certificate
   "Every certificate this actor produces is UNSIGNED -- signature is the
@@ -70,7 +70,7 @@
   digits per ISO 7064 MOD 97-10 -- the standard IBAN validation
   rearrangement."
   [iban]
-  (let [cleaned (str/replace (str/upper-case iban) #"\s" "")
+  (let [cleaned (str/replace (str/upper iban) #"\s" "")
         rearranged (str (subs cleaned 4) (subs cleaned 0 4))]
     (apply str (map char->digits rearranged))))
 
@@ -112,7 +112,7 @@
     (throw (ex-info "payment-execution: jurisdiction required" {})))
   (when (< sequence 0)
     (throw (ex-info "payment-execution: sequence must be >= 0" {})))
-  (let [execution-number (str (str/upper-case jurisdiction) "-PMT-" (zero-pad sequence 6))
+  (let [execution-number (str (str/upper jurisdiction) "-PMT-" (zero-pad sequence 6))
         record {"record_id" execution-number
                 "kind" "payment-execution-draft"
                 "account_id" account-id
@@ -137,7 +137,7 @@
     (throw (ex-info "remittance-payout: jurisdiction required" {})))
   (when (< sequence 0)
     (throw (ex-info "remittance-payout: sequence must be >= 0" {})))
-  (let [payout-number (str (str/upper-case jurisdiction) "-REM-" (zero-pad sequence 6))
+  (let [payout-number (str (str/upper jurisdiction) "-REM-" (zero-pad sequence 6))
         record {"record_id" payout-number
                 "kind" "remittance-payout-draft"
                 "account_id" account-id
@@ -165,9 +165,9 @@
   (when (< sequence 0)
     (throw (ex-info "consent: sequence must be >= 0" {})))
   (let [tag (if (= kind :pis) "PIS" "AIS")
-        consent-number (str (str/upper-case jurisdiction) "-" tag "-" (zero-pad sequence 6))
+        consent-number (str (str/upper jurisdiction) "-" tag "-" (zero-pad sequence 6))
         record {"record_id" consent-number
-                "kind" (str (str/lower-case tag) "-consent-draft")
+                "kind" (str (str/lower tag) "-consent-draft")
                 "account_id" account-id
                 "jurisdiction" jurisdiction
                 "immutable" true}]
