@@ -111,7 +111,7 @@ transfer is never autonomous, at any phase, by construction.** Two
 independent layers enforce this (`pi.governor`'s `:actuation/execute-
 payment`/`:actuation/remit-payout` high-stakes gate and `pi.phase`'s
 phase table, which never puts either op in any phase's `:auto` set) --
-see `pi.phase`'s docstring and `test/pi/phase_test.clj`'s
+see `pi.phase`'s docstring and `test/pi/phase_test.cljk`'s
 `actuation-never-auto-at-any-phase`. The actor may draft, check and
 recommend; a human PI operator is always the one who actually executes a
 payment or remits a payout. This actor has TWO actuation events
@@ -175,14 +175,14 @@ full architecture and decision record.
 
 | File | Role |
 |---|---|
-| `src/pi/store.cljc` | **Store** protocol -- `MemStore` (this actor is MemStore-only at this maturity stage, see `Maturity` below) + append-only audit ledger + separate payment-execution/remittance-payout/PIS-AIS-consent history |
-| `src/pi/registry.cljc` | Payment-execution + remittance-payout + PIS/AIS-consent draft records, plus `iban-checksum-invalid?` -- a REAL, independently-implemented ISO 7064 MOD 97-10 check (the same algorithm `cloud-itonami-isic-6419`'s `banking.registry` establishes, re-implemented here so this standalone repo has no compile-time dependency on a sibling actor's internals) |
-| `src/pi/facts.cljc` | Per-jurisdiction PSD2/payment-services licensing + AML/KYC catalog with an official spec-basis citation per entry, honest coverage reporting |
-| `src/pi/piadvisor.cljc` | **PaymentOps-LLM** -- `mock-advisor` ‖ `llm-advisor`; intake/compliance-verification/sanctions-screening/PIS-AIS-consent/payment-execution/remittance-payout proposals |
-| `src/pi/governor.cljc` | **PIGovernor** -- effect-matches-op · spec-basis · evidence-incomplete · IBAN checksum (independent recompute) · sanctions flag (unconditional) · PIS-consent-missing · already-executed/already-remitted guards · confidence/actuation gate |
-| `src/pi/phase.cljc` | **Phase 0→3** -- read-only → assisted intake → assisted verify → supervised (both payment execution and remittance payout always human; account intake is the ONLY auto-eligible op, no direct capital risk) |
-| `src/pi/operation.cljc` | **OperationActor** -- langgraph-clj StateGraph |
-| `src/pi/sim.cljc` | demo driver |
+| `src/pi/store.cljk` | **Store** protocol -- `MemStore` (this actor is MemStore-only at this maturity stage, see `Maturity` below) + append-only audit ledger + separate payment-execution/remittance-payout/PIS-AIS-consent history |
+| `src/pi/registry.cljk` | Payment-execution + remittance-payout + PIS/AIS-consent draft records, plus `iban-checksum-invalid?` -- a REAL, independently-implemented ISO 7064 MOD 97-10 check (the same algorithm `cloud-itonami-isic-6419`'s `banking.registry` establishes, re-implemented here so this standalone repo has no compile-time dependency on a sibling actor's internals) |
+| `src/pi/facts.cljk` | Per-jurisdiction PSD2/payment-services licensing + AML/KYC catalog with an official spec-basis citation per entry, honest coverage reporting |
+| `src/pi/piadvisor.cljk` | **PaymentOps-LLM** -- `mock-advisor` ‖ `llm-advisor`; intake/compliance-verification/sanctions-screening/PIS-AIS-consent/payment-execution/remittance-payout proposals |
+| `src/pi/governor.cljk` | **PIGovernor** -- effect-matches-op · spec-basis · evidence-incomplete · IBAN checksum (independent recompute) · sanctions flag (unconditional) · PIS-consent-missing · already-executed/already-remitted guards · confidence/actuation gate |
+| `src/pi/phase.cljk` | **Phase 0→3** -- read-only → assisted intake → assisted verify → supervised (both payment execution and remittance payout always human; account intake is the ONLY auto-eligible op, no direct capital risk) |
+| `src/pi/operation.cljk` | **OperationActor** -- langgraph-clj StateGraph |
+| `src/pi/sim.cljk` | demo driver |
 | `test/pi/*_test.clj` | governor contract · phase invariants · store contract · registry conformance · facts coverage · real-LLM advisor (mock-model) |
 
 ## Business-process coverage (honest)
