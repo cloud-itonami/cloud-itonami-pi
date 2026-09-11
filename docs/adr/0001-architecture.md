@@ -149,7 +149,7 @@ liability を持つ構造にする。PI は ISIC コードではなくライセ�
   `-emi`（EMI、並行起票）・`-card-issuing`（issuer-side、並行起票）との
   責務境界を明文化した。
 - (+) 実アクチュエーション不変条件（governor + phase の2層）は
-  `test/pi/phase_test.clj` の `actuation-never-auto-at-any-phase` で
+  `test/pi/phase_test.cljk` の `actuation-never-auto-at-any-phase` で
   リグレッションを機械的に検出できる。
 - (+) `cloud-itonami-isic-6910` の ADR-0001 が15の Addendum を経て
   発見した governance-bypass バグクラス（特に effect-mismatch）を、
