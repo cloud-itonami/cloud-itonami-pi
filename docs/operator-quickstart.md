@@ -20,7 +20,7 @@ cd cloud-itonami-pi
 ## 2. Run tests
 
 ```bash
-clojure -M:dev:test
+kbb -M:dev:test
 ```
 
 Expect green if maturity is `unknown`. Fix failures before operating.

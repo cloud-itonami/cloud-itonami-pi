@@ -1,5 +1,5 @@
 (ns pi.sim
-  "Demo driver -- `clojure -M:dev:run`. Walks a clean account through
+  "Demo driver -- `kbb -M:dev:run`. Walks a clean account through
   intake -> AML/KYC compliance verification -> sanctions screening ->
   PIS consent registration -> a PIS-channel payment-execution proposal
   (always escalates) -> human approval -> commit -> a money-remittance
