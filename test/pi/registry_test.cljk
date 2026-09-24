@@ -2,7 +2,7 @@
   "Conformance tests for `pi.registry` -- the ISO 7064 MOD 97-10 IBAN
   checksum re-implementation and the payment-execution/remittance-payout/
   consent draft-record builders."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [pi.registry :as r]))
 
 (deftest certificate-is-a-draft-not-a-real-execution

@@ -6,7 +6,7 @@
   `store_contract_test` establishes (there they additionally prove
   MemStore ≡ DatomicStore parity; a future DatomicStore addition to this
   repo should extend this namespace the same way, not replace it)."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [pi.store :as store]))
 
 (deftest read-parity
