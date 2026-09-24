@@ -6,7 +6,7 @@
   one that answers a harmless-looking request with a mismatched,
   higher-stakes :effect -- can never auto-execute a payment or
   auto-remit a payout."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [langgraph.graph :as g]
             [langchain.model :as model]
             [pi.piadvisor :as piadvisor]
